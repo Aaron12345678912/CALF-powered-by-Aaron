@@ -1,0 +1,14 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Aug 22 14:50:38 2025
+
+@author: dell
+"""
+
+# 打开git bash user
+git init bash;
+export PYTHONIOENCODING=UTF-8;
+conda activate tslib;
+
+# 运行代码：
+sh scripts/long_term_forecasting/Solar_test.sh
