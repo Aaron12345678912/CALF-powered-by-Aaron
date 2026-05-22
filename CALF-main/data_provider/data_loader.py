@@ -430,7 +430,7 @@ class Dataset_Solar(Dataset):
         seq_x_mark = torch.zeros((seq_x.shape[0], 1))
         seq_y_mark = torch.zeros((seq_x.shape[0], 1))
 
-        cycle_index = torch.tensor(self.cycle_index[s_begin])
+        cycle_index = torch.tensor(self.cycle_index[s_end])
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark, cycle_index
 

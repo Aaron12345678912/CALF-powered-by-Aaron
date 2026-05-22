@@ -37,15 +37,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         main_params = []
         for n, p in self.model.named_parameters():
             if p.requires_grad:
-                if '_proj' in n:
-                    proj_params.append(p)
-                elif 'temporalQuery' in n or 'channelAggregator' in n:
+                if 'temporalQuery' in n or 'tq_proj' in n:
                     tq_params.append(p)
+                elif '_proj' in n:
+                    proj_params.append(p)
                 else:
                     main_params.append(p)
         model_optim = optim.Adam([
             {"params": main_params, "lr": self.args.learning_rate},
-            {"params": tq_params, "lr": 0.001},
+            # 采用“慢速平滑”的分层学习率，防止物理基线被极端天气噪声带偏
+            {"params": tq_params, "lr": self.args.learning_rate * 0.1},
         ])
         loss_optim = optim.Adam(proj_params, lr=1e-4)
 
@@ -78,7 +79,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         model_optim, loss_optim = self._select_optimizer()
         criterion = self._select_criterion()
         
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(model_optim, T_max=self.args.tmax, eta_min=1e-8)
+        if self.args.cos == 1:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                model_optim, mode='min', factor=self.args.lr_factor,
+                patience=self.args.lr_patience, min_lr=1e-7
+            )
+        elif self.args.cos == 2:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(model_optim, T_max=self.args.tmax, eta_min=1e-8)
+        else:
+            scheduler = None
         scaler = torch.cuda.amp.GradScaler(enabled=self.args.use_amp)#初始化梯度缩放器
 
         epoch_times = []
@@ -148,7 +157,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
 
-            if self.args.cos:
+            if self.args.cos == 1:
+                scheduler.step(vali_loss)
+                print("lr = {:.10f}".format(model_optim.param_groups[0]['lr']))
+            elif self.args.cos == 2:
                 scheduler.step()
                 print("lr = {:.10f}".format(model_optim.param_groups[0]['lr']))
             else:
@@ -310,7 +322,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 preds_windows.append(np.zeros(preds.shape[1]))
 
         if len(trues_windows) > 0:
-            save_path = os.path.join(vis_folder, 'advanced_ablation_station_0.pdf')
+            save_path = os.path.join(vis_folder, 'advanced_station_0.pdf')
             visual_advanced(trues_windows, preds_windows, metrics_full=(mse, mae), name=save_path)
             print(f'Advanced Visualization saved: {save_path}')
 

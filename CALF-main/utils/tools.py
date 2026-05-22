@@ -97,28 +97,21 @@ def visual(true, preds=None, name='./pic/test.pdf'):
     plt.savefig(name, bbox_inches='tight')
     plt.close()
 
-def visual_advanced(trues, preds_full, preds_wo_text=None, metrics_full=None, metrics_wo=None, name='./pic/test.pdf'):
+def visual_advanced(trues, preds_full, preds_baseline=None, metrics_full=None, metrics_baseline=None, name='./pic/test.pdf', baseline_name='Baseline'):
     """
     Advanced Results visualization resembling Ablation Study Comparison
     """
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), facecolor='#f5f5f5')
-    fig.suptitle('Ablation Study Comparison: Station 0', fontsize=20, fontweight='bold', y=0.98)
+    if preds_baseline is not None:
+        fig.suptitle('Ablation Study Comparison: Station 0', fontsize=20, fontweight='bold', y=0.98)
+    else:
+        fig.suptitle('Prediction Visualization: Station 0', fontsize=20, fontweight='bold', y=0.98)
     
     windows = [0, 25, 50]
     titles = ['Forecast Window 1', 'Forecast Window 26', 'Forecast Window 51']
     
-    # Generate some mock data for the baseline if not provided
-    if preds_wo_text is None:
-        preds_wo_text = []
-        for i in range(len(trues)):
-            noise = np.random.normal(0, 0.15, len(trues[i]))
-            # mock worse prediction
-            preds_wo_text.append(trues[i] * 0.8 + noise)
-            
     if metrics_full is None:
-        metrics_full = (0.2773, 0.3025)
-    if metrics_wo is None:
-        metrics_wo = (0.2431, 0.2768)
+        metrics_full = (0.0, 0.0)
         
     for i, ax in enumerate(axes):
         ax.set_facecolor('#ffffff')
@@ -127,13 +120,15 @@ def visual_advanced(trues, preds_full, preds_wo_text=None, metrics_full=None, me
         idx = i if i < len(trues) else 0
         gt = trues[idx]
         pf = preds_full[idx]
-        pw = preds_wo_text[idx]
 
         ax.plot(gt, label='Ground Truth', color='#1f2b6c', linewidth=2.5)
-        ax.plot(pf, label='CALF (Full)', color='#00b85c', linewidth=2.5, linestyle='--')
-        ax.plot(pw, label='CALF (w/o Text)', color='#e63946', linewidth=2)
+        ax.plot(pf, label='CALF + TQ (Ours)', color='#00b85c', linewidth=2.5, linestyle='--')
         
-        ax.fill_between(range(len(gt)), gt, pf, color='#00b85c', alpha=0.1, label='Full Model Error')
+        if preds_baseline is not None:
+            pb = preds_baseline[idx]
+            ax.plot(pb, label=baseline_name, color='#e63946', linewidth=2)
+            
+        ax.fill_between(range(len(gt)), gt, pf, color='#00b85c', alpha=0.1, label='Model Error')
         
         ax.set_title(titles[i], fontsize=14, fontweight='bold', loc='left', pad=10, color='#444444')
         ax.set_ylabel('Normalized Value', fontsize=12)
@@ -148,19 +143,27 @@ def visual_advanced(trues, preds_full, preds_wo_text=None, metrics_full=None, me
     table_ax.axis('off')
     
     mse_full, mae_full = metrics_full
-    mse_wo, mae_wo = metrics_wo
-    imp_mse = (mse_wo - mse_full) / mse_wo * 100
-    imp_mae = (mae_wo - mae_full) / mae_wo * 100
     
-    cell_text = [
-        ['CALF Full Model', f'{mse_full:.4f}', f'{mae_full:.4f}', '-'],
-        ['CALF w/o Text Branch', f'{mse_wo:.4f}', f'{mae_wo:.4f}', '-'],
-        ['Improvement', f'{imp_mse:.2f}%', f'{imp_mae:.2f}%', 'N/A']
-    ]
+    if preds_baseline is not None and metrics_baseline is not None:
+        mse_base, mae_base = metrics_baseline
+        imp_mse = (mse_base - mse_full) / mse_base * 100 if mse_base != 0 else 0
+        imp_mae = (mae_base - mae_full) / mae_base * 100 if mae_base != 0 else 0
+        
+        cell_text = [
+            ['CALF + TQ (Ours)', f'{mse_full:.4f}', f'{mae_full:.4f}', '-'],
+            [baseline_name, f'{mse_base:.4f}', f'{mae_base:.4f}', '-'],
+            ['Improvement', f'{imp_mse:.2f}%', f'{imp_mae:.2f}%', 'N/A']
+        ]
+        col_labels = ['Model Configuration', 'MSE (↓)', 'MAE (↓)', 'Improvement (%)']
+    else:
+        cell_text = [
+            ['CALF + TQ (Ours)', f'{mse_full:.4f}', f'{mae_full:.4f}']
+        ]
+        col_labels = ['Model Configuration', 'MSE (↓)', 'MAE (↓)']
     
     table = table_ax.table(
         cellText=cell_text,
-        colLabels=['Model Configuration', 'MSE (↓)', 'MAE (↓)', 'Improvement (%)'],
+        colLabels=col_labels,
         loc='center',
         cellLoc='center',
         bbox=[0, 0, 1, 1]
@@ -173,7 +176,7 @@ def visual_advanced(trues, preds_full, preds_wo_text=None, metrics_full=None, me
         if row == 0:
             cell.set_text_props(weight='bold', color='white')
             cell.set_facecolor('#4a5e6d')
-        elif row == 3:
+        elif preds_baseline is not None and row == 3:
             cell.set_text_props(weight='bold', color='#2e7d32')
             cell.set_facecolor('#e8f5e9')
         else:

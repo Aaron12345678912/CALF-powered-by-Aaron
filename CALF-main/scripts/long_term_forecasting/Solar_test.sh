@@ -12,33 +12,37 @@ if [ ! -d "$logs_dir" ]; then mkdir "$logs_dir"; fi
 
 # ========== 手动参数配置区 ==========
 seq_len=96
-pred_lens=" 192 336 720"
-batch_size=32
-learning_rate=0.0002
+pred_lens="720"
+batch_size=64
+learning_rate=0.0004
 train_epochs=10
 d_model=768
 n_heads=4
 d_ff=$((4 * d_model))
-dropout=0.2
+dropout=0.3
 enc_in=137
 c_out=137
 gpt_layers=3
 
 r=8
 lora_alpha=32
-lora_dropout=0.1
+lora_dropout=0.2
 
-feature_w=0.1
-output_w=0.2
+feature_w=0.2
+output_w=0.1
 task_w=0.7
 
-random_seed=2025
 cycle=144
+
+# 随机种子列表，可手动增删
+random_seeds="2027 2028 2029"
 # ====================================
 
 for pred_len in $pred_lens; do
 
-log_file="$logs_dir/${model}_${seq_len}_${pred_len}_dff${d_ff}_r${r}_fw${feature_w}_ow${output_w}_${random_seed}.logs"
+for random_seed in $random_seeds; do
+
+log_file="$logs_dir/${model}_${seq_len}_${pred_len}_dff${d_ff}_r${r}_fw${feature_w}_ow${output_w}_seed${random_seed}.logs"
 
 CUDA_VISIBLE_DEVICES=$GPU \
 python -u run.py \
@@ -65,21 +69,24 @@ python -u run.py \
   --itr 1 \
   --model $model \
   --cos 1 \
-  --tmax 10 \
+  --lr_factor 0.8 \
+  --lr_patience 2 \
   --r $r \
   --lora_alpha $lora_alpha \
   --lora_dropout $lora_dropout \
   --patience 3 \
   --bestmodel \
   --task_w $task_w \
-  --task_loss smooth_l1 \
-  --feature_loss smooth_l1 \
-  --output_loss smooth_l1 \
+  --task_loss l1 \
+  --feature_loss l1 \
+  --output_loss l1 \
   --feature_w $feature_w \
   --output_w $output_w \
   --random_seed $random_seed \
   --cycle $cycle \
   --use_amp \
-  2>&1 | tee "$log_file"
+  2>&1 | tee -a "$log_file"
+
+done
 
 done

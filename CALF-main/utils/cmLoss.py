@@ -7,7 +7,7 @@ from copy import deepcopy
 from .losses import mape_loss, mase_loss, smape_loss
 
 loss_dict = {
-    "l1": nn.L1Loss(),
+    "l1": nn.L1Loss(),#标准mae
     "smooth_l1": nn.SmoothL1Loss(),
     "ce": nn.CrossEntropyLoss(),
     "mse": nn.MSELoss(),
@@ -63,11 +63,10 @@ class cmLoss(nn.Module):
 
         batch_y = batch_y.to(output_loss.device)
         
-        # supervised task loss — 两个分支都算，取平均
+        
         if self.task_name == "long_term_forecast":
-            task_loss_time = self.task_loss(outputs_time, batch_y)
-            task_loss_text = self.task_loss(outputs_text, batch_y)
-            task_loss = (task_loss_time + task_loss_text) / 2.0
+            task_loss = self.task_loss(outputs_time, batch_y)
+            
         elif self.task_name == "short_term_forecast":
             task_loss = self.task_loss(in_sample, freq_map, outputs_time, batch_y, batch_y_mark)
         elif self.task_name == "classification":

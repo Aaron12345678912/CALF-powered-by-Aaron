@@ -7,20 +7,10 @@ from models.GPT2_arch import AccustumGPT2Model
 class Encoder_PCA(nn.Module):
     def __init__(self, input_dim, word_embedding, hidden_dim=768, num_heads=12):
         super(Encoder_PCA, self).__init__()
-        # Linear projection → 产生 K, V
+        # Linear projection → 产生 Q
         self.linear = nn.Linear(input_dim, hidden_dim)
 
-        # 两层变换 → 产生 Q
-        self.time_transform = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-        )
-
-        # 时间序列交叉注意力: Q=两层变换, K=V=Linear投影
-        self.time_cross_attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads)
-
-        # 文本分支交叉注意力: Q=时间特征, K=V=词嵌入 (冻结保持语义)
+        # 文本分支交叉注意力: Q=原始实测信号, K=V=词嵌入 (冻结保持语义)
         self.word_cross_attention = nn.MultiheadAttention(embed_dim=hidden_dim, num_heads=num_heads)
         
         # word_embedding 可能是 (d_model, N) 或 (N, d_model)，统一转为 (N, d_model)
@@ -29,7 +19,7 @@ class Encoder_PCA(nn.Module):
         else:
             self.word_embedding = word_embedding  # 已经是 (N, d_model)
 
-    def forward(self, x):
+    def forward(self, x, x_TQ=None):
         B = x.shape[0]
         if self.word_embedding.ndim == 2:
             word_emb = self.word_embedding.repeat(B, 1, 1)  # (B, N, d_model)
@@ -38,27 +28,22 @@ class Encoder_PCA(nn.Module):
         else:
             word_emb = self.word_embedding
 
-        # Linear 投影 → K, V
+        # Linear 投影 → Q
         x_proj = self.linear(x)  # (B, M, d_model)
 
-        # 两层变换 → Q
-        x_q = self.time_transform(x_proj)  # (B, M, d_model)
+        # 与 TQ 特征进行残差融合并自动退化
+        if x_TQ is not None:
+            x_fused_tq = x_proj + x_TQ
+        else:
+            x_fused_tq = x_proj
 
-        # 时间交叉注意力: Q 来自两层变换, K,V 来自 Linear 投影
-        x_time, _ = self.time_cross_attention(
-            x_q.transpose(0, 1),
-            x_proj.transpose(0, 1),
-            x_proj.transpose(0, 1),
-        )
-        x_time = x_time.transpose(0, 1)
-
-        # 文本分支交叉注意力: Q 来自融合后的特征, K,V 来自词嵌入（冻结）
-        q = x_time.transpose(0, 1)
+        # 文本分支交叉注意力: Q 替换为残差融合特征, K,V 来自词嵌入（冻结）
+        q = x_fused_tq.transpose(0, 1)
         k = v = word_emb.transpose(0, 1)
         x_text, _ = self.word_cross_attention(q, k, v)
         x_text = x_text.transpose(0, 1)
 
-        return x_time, x_text
+        return x_fused_tq, x_text
 
 class Model(nn.Module):
     def __init__(self, configs, device):
@@ -105,12 +90,24 @@ class Model(nn.Module):
         self.cycle_len = configs.cycle
         self.enc_in = configs.enc_in
 
-        self.temporalQuery = torch.nn.Parameter(
-            torch.randn(self.cycle_len, self.enc_in) * 0.02, requires_grad=True
-        )
-        self.channelAggregator = nn.MultiheadAttention(
-            embed_dim=self.seq_len, num_heads=4, batch_first=True, dropout=0.1
-        )
+        # 1. 基础初始化：依然使用微小随机白噪声
+        init_tq = torch.randn(self.cycle_len, self.enc_in) * 0.02
+        
+        # 2. 物理注入 (Physics-Informed Prior)
+        # 仅仅作为优良的“起跑线”，训练过程中依然 100% 跟随梯度微调！
+        if self.cycle_len == 144:
+            with torch.no_grad():
+                t = torch.arange(self.cycle_len).float()
+                # 构建一个开口向下、顶点在中午(72)的抛物线形状先验，夜晚（0-35和110-143）被 clamp 截断为极小值
+                parabola = torch.clamp(1.0 - ((t - 72.0) / 36.0)**2, min=0.0).unsqueeze(1).repeat(1, self.enc_in)
+                # 叠加先验，让它一上来就拥有昼夜规律的轮廓
+                init_tq = init_tq + parabola * 0.1
+
+        # 3. 封装为 Parameter，并开启 requires_grad=True 允许跟随梯度更新
+        self.temporalQuery = torch.nn.Parameter(init_tq, requires_grad=True)
+        
+        # 物理流投影层：将原始 seq_len 独立投影到大模型维度 d_model
+        self.tq_proj = nn.Linear(self.seq_len, configs.d_model)
         # -----------------
 
         self.in_layer = Encoder_PCA(
@@ -120,11 +117,7 @@ class Model(nn.Module):
         )
         
         if self.task_name == 'long_term_forecast' or self.task_name == 'short_term_forecast':
-            self.out_layer = nn.Sequential(
-                nn.Linear(configs.d_model, configs.d_model),
-                nn.ReLU(),
-                nn.Linear(configs.d_model, configs.pred_len),
-            )
+            self.out_layer = nn.Linear(configs.d_model, configs.pred_len)
         elif self.task_name == 'classification':
             self.out_layer = nn.Linear(configs.d_model * configs.enc_in, configs.num_class)
         elif self.task_name == 'imputation':
@@ -132,20 +125,21 @@ class Model(nn.Module):
         elif self.task_name == 'anomaly_detection':
             self.out_layer = nn.Linear(configs.d_model, configs.seq_len)
 
-        for layer in (self.gpt2_text, self.gpt2, self.in_layer, self.out_layer, self.time_proj, self.text_proj, self.channelAggregator):
+        for layer in (self.gpt2_text, self.gpt2, self.in_layer, self.out_layer, self.time_proj, self.text_proj, self.tq_proj):
             layer.to(device=device)
             layer.train()
         
-        self.cnt = 0
-        
+
 
     def forecast(self, x, cycle_index=None):
         B, L, M = x.shape
 
-        means = x.mean(1, keepdim=True).detach()
-        x = x - means
-        stdev = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5).detach() 
-        x /= stdev
+        # [RevIN 标准化注释已标明]
+        # means = x.mean(1, keepdim=True).detach()
+        # x = x - means
+        # stdev = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5).detach() 
+        # x /= stdev
+
 
         # ---- TQ 模块：在标准化后的数据上提取周期模式 ----
         if cycle_index is not None:
@@ -157,28 +151,24 @@ class Model(nn.Module):
         # temporalQuery: (cycle_len, enc_in) -> 收集得到 (B, seq_len, enc_in)
         query_input = self.temporalQuery[gather_index]  # (B, seq_len, enc_in)
         
-        # 转换维度为 (Batch, Channel, Seq_Len) 用于 Channel Aggregation
-        x_tq_input = x.permute(0, 2, 1)        # (B, enc_in, seq_len)
+        # 转换维度为 (Batch, Channel, Seq_Len) 
+        x = rearrange(x, 'b l m -> b m l')  # (B, enc_in, seq_len)
         query_tq_input = query_input.permute(0, 2, 1) # (B, enc_in, seq_len)
         
-        # Channel aggregation: 在通道维度上做 Attention (embed_dim=seq_len)
-        channel_info = self.channelAggregator(
-            query_tq_input, x_tq_input, x_tq_input
-        )[0]  # 返回形状: (B, enc_in, seq_len)
+        # 物理流：得到绝对纯净、不受脏数据污染的刚性基线特征 x_TQ
+        x_TQ = self.tq_proj(query_tq_input) # (B, enc_in, d_model)
+        
+        # ---- 3. 调用重构后的 PCA 层进行残差融合 ----
+        # x_fusion: 融合特征 x_fused_tq (x_proj + x_TQ)
+        # x_text: 交叉注意力结果（Query 为 x_fused_tq）
+        x_fusion, x_text = self.in_layer(x, x_TQ=x_TQ) # 均为 (B, enc_in, d_model)
         # ----------------------------------------
 
-        x = rearrange(x, 'b l m -> b m l')  # (B, enc_in, seq_len)
-
-        x = x + channel_info  # TQ 增强后的特征
-        # ----------------------------------------
-
-        outputs_time1, outputs_text1 = self.in_layer(x)
-
-        outputs_time, intermidiate_feat_time = self.gpt2(inputs_embeds=outputs_time1)
-        outputs_text, intermidiate_feat_text = self.gpt2_text(inputs_embeds=outputs_text1)
+        outputs_time, intermidiate_feat_time = self.gpt2(inputs_embeds=x_fusion)
+        outputs_text, intermidiate_feat_text = self.gpt2_text(inputs_embeds=x_text)
         # residue connection
-        outputs_time += outputs_time1
-        outputs_text += outputs_text1
+        outputs_time = outputs_time + x_fusion
+        outputs_text = outputs_text + x_text
         
         intermidiate_feat_time = tuple([self.time_proj[idx](feat) for idx, feat in enumerate(list(intermidiate_feat_time))])
         intermidiate_feat_text = tuple([self.text_proj[idx](feat) for idx, feat in enumerate(list(intermidiate_feat_text))])
@@ -189,8 +179,10 @@ class Model(nn.Module):
         outputs_time = rearrange(outputs_time, 'b m l -> b l m')
         outputs_text = rearrange(outputs_text, 'b m l -> b l m')
 
-        outputs_text = outputs_text * stdev + means
-        outputs_time = outputs_time * stdev + means
+        # [RevIN 反标准化注释已标明]
+        # outputs_text = outputs_text * stdev + means
+        # outputs_time = outputs_time * stdev + means
+
 
         return {
             'outputs_text': outputs_text,

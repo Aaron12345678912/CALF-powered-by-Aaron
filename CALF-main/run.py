@@ -103,6 +103,8 @@ if __name__ == '__main__':
     # self
     parser.add_argument('--tmax', type=int, default=20) # rl 余弦调整
     parser.add_argument('--cos', type=int, default=1)
+    parser.add_argument('--lr_factor', type=float, default=0.5, help='factor for ReduceLROnPlateau')
+    parser.add_argument('--lr_patience', type=int, default=2, help='patience for ReduceLROnPlateau')
 
     # lora
     parser.add_argument('--r', type=int, default=8)
